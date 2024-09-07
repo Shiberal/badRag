@@ -21,8 +21,8 @@ class Database:
         # Convert the embedding dictionary into a string representation of the array
         embedding_str = str(embedding)
         
-        # Automate tagging process (for now, just append 'example' to tags)
-        tags = 'example'
+        # Automate tagging process (for now, just append 'example' to tags) <-- might be a todo.
+        tags = 'example' # 
         
         self.cursor.execute('INSERT INTO embeddings (document_name, context, embedding, tags) VALUES (?, ?, ?, ?)', (document_name, context, embedding_str, tags))
         self.conn.commit()
