@@ -1,1 +1,13 @@
 /__pycache__
+.env
+model_dictionary.dict
+model_index.index
+model_lsi.model
+model_lsi.model.projection
+model_tfidf.model
+nlp_documents.db
+.DS_Store
+output.txt
+*.pyc
+rrrr
+Frankenstein-marywollenstonecraft-1oct1993.txt

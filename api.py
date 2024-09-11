@@ -1,46 +1,88 @@
+import atexit
+import os
+from time import sleep
 from typing import Union
-from fastapi import FastAPI # type: ignore
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import UJSONResponse
+from dotenv import load_dotenv
+from nlp.nlp import NLP
+from ollama_rag import OllamaRAG 
+from fastapi.middleware.cors import CORSMiddleware
 
-from ollama_rag import OllamaRAG
+# CORS setup
+origins = [
+    "http://localhost.tiangolo.com",
+    "https://localhost.tiangolo.com",
+    "http://localhost",
+    "http://localhost:8080",
+]
 
-ollama = OllamaRAG('ollama.db', "http://192.168.1.44:11434")
+load_dotenv()
 
+# Initialize the NLP and OllamaRAG components
+ollama = OllamaRAG('ollama.db', os.getenv('HOST_OLLAMA'))
+
+nlp = NLP('nlp_documents.db')
+print ("NLP and OllamaRAG initialized")
+
+nlp.load_models()
+print ("Models loaded")
+
+
+
+
+# Register the cleanup function to save models and close resources
+def on_exit():
+    ollama.close()
+
+atexit.register(on_exit)
+
+# FastAPI app initialization
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.get("/addFragment")
-async def addFragment(text_fragment: str, document_name: str):
-    return {"content": text_fragment, "document_name": document_name, "embedding": ollama.generate_embeddings(text_fragment, document_name)}
+@app.get("/")
+async def read_root():
+    return {"Hello": "World"}
 
-@app.get("/addWholeDocument")   
-async def addWholeDocument(text: str, document_name: str):
-    return ollama.add_full_document(document_name, text)
-
-@app.get("/getBestMatch")
-async def getBestMatch(text: str):
-    best, best_indx, score, text = ollama.get_best_match(ollama.generate_embedding(text))
-    return {"content":  text, "score" : score}
-
-@app.get("/listAllDocuments")
-async def listAllDocuments(limit: int = 0, offset: int = 0):
-    return ollama.listAllDocuments( limit, offset)
-
-@app.get("/removeWholeDocument")
-async def removeDocument(document_name: str):
-    ollama.remove_whole_document(document_name)
-    return {"document_name": document_name}
-
-@app.get("/removeFragment")
-async def removeFragment(id):
-    ollama.remove_fragment(id)
-    return {"id": id}
-
-@app.get("/generateEmbedding")
-async def generateEmbedding(text: str, document_name: str):
-    return ollama.generate_embeddings(text, document_name)
-
-@app.get("/getWholeDocumentByFragment")
-async def getWholeDocumentByFragment(id):
-    return ollama.getDocumentByFragmentID(id)
+@app.post("/addDocument")
+async def add_document(file: UploadFile = File(...)):
+    """
+    Endpoint to add a document with multiple fragments.
+    Breaks down the uploaded document into fragments (paragraphs)
+    and stores them in the database.
+    """
+    contents = await file.read()
+    paragraphs = nlp.break_down_to_paragraphs(contents.decode('utf-8'))
+    
+    if not paragraphs:
+        return UJSONResponse(status_code=400, content="Document is empty or cannot be processed")
+    
+    # Using the first line or a fixed value as the title, can be changed as needed
+    title = file.filename or "Untitled Document"
+    
+    # Add the document with its paragraphs as fragments
+    nlp.add_document_with_fragments(title, paragraphs)
+    nlp.save_models()
+    
+    return UJSONResponse(status_code=200, content="Document with fragments added successfully")
 
 
+@app.post("/query")
+async def query(query: str, document_id: int = 0):
+    """
+    Endpoint to search for documents by querying similar fragments
+    and returning aggregated document results.
+    """
+    res = nlp.search_similar_texts(query, document_id)
+    
+    if not res:
+        return UJSONResponse(status_code=404, content="No similar documents found")
 
+    return UJSONResponse(status_code=200, content=res)

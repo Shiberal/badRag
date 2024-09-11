@@ -1,0 +1,23 @@
+{
+ "sqltools.useNodeRuntime": true,
+ "sqltools.connections": [
+  {
+   "previewLimit": 50,
+   "driver": "SQLite",
+   "name": "ollamadb",
+   "database": "${workspaceFolder:badRag}/ollama.db"
+  },
+  {
+   "previewLimit": 50,
+   "driver": "SQLite",
+   "database": "${workspaceFolder:badRag}/nlp_documents.db",
+   "name": "nlp_documents"
+  },
+  {
+   "previewLimit": 50,
+   "driver": "SQLite",
+   "name": "ggg",
+   "database": "${workspaceFolder:badRag}/nlp_documents.db"
+  }
+ ]
+}
