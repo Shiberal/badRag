@@ -26,18 +26,14 @@ class NLP:
         # Create tables if they don't exist
         self.create_tables()
         
-        # Load documents and fragments from the database
+        # Load models and dictionary
+        self.load_dictionary()
+        self.load_bow_from_db()
         self.load_documents()
-        self.load_fragments()
-        
 
-    def load_documents(self):
-        self.documents = self.db.execute("SELECT title FROM documents;").fetchall()
-        print(f"Loaded documents: {len(self.documents)}")
-    
     def create_tables(self):
         """
-        Create the tables for storing documents, fragments, and their relationships.
+        Create the tables for storing documents, fragments, their relationships, and dictionary.
         """
         queries = [
             """
@@ -58,6 +54,21 @@ class NLP:
                 fragment_id INTEGER,
                 FOREIGN KEY (doc_id) REFERENCES documents(doc_id),
                 FOREIGN KEY (fragment_id) REFERENCES fragments(fragment_id)
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS bow_data (
+                doc_id INTEGER,
+                word_id INTEGER,
+                frequency INTEGER NOT NULL,
+                FOREIGN KEY (doc_id) REFERENCES documents(doc_id),
+                FOREIGN KEY (word_id) REFERENCES dictionary_data(word_id)
+            );
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS dictionary_data (
+                word_id INTEGER PRIMARY KEY,
+                word TEXT NOT NULL
             );
             """
         ]
@@ -93,7 +104,6 @@ class NLP:
         return tokens
 
     def buildWordDict(self, tokens_list):
-        from gensim import corpora
         dictionary = corpora.Dictionary(tokens_list)
         return dictionary
 
@@ -119,86 +129,82 @@ class NLP:
             fragment_id = cursor.lastrowid
             cursor.execute("INSERT INTO document_fragment (doc_id, fragment_id) VALUES (?, ?);", (doc_id, fragment_id))
 
-        self.db.commit()
-        
-        # Update in-memory structures
-        for fragment_text in fragments:
+            # Tokenize and update dictionary
             tokens = self.tokenizer(fragment_text)
-
             if not self.dictionary:
                 self.dictionary = self.buildWordDict([tokens])
-                
             else:
                 self.dictionary.add_documents([tokens])
-
+            
             self.dictionary = self.filterWordDict(self.dictionary)
-            
             bow = self.dictionary.doc2bow(tokens)
-            
             self.corpus.append(bow)
             
-        
+            self.save_bow_to_db(doc_id, bow)
+
+        self.db.commit()
         self._update_models()
+        self.save_models()
 
-        print (self.tfidf_model, self.lsi_model)
-
-    def load_document_with_fragments(self, doc_id):
+    def save_bow_to_db(self, doc_id, bow):
         """
-        Load a document and its fragments by document ID.
-        """
-        cursor = self.db.cursor()
-
-        # Fetch the document
-        cursor.execute("SELECT title FROM documents WHERE doc_id = ?;", (doc_id,))
-        document = cursor.fetchone()
-
-        # Fetch the associated fragments
-        cursor.execute("""
-            SELECT f.fragment_id, f.text 
-            FROM fragments f
-            JOIN document_fragment df ON f.fragment_id = df.fragment_id
-            WHERE df.doc_id = ?;
-        """, (doc_id,))
-        fragments = cursor.fetchall()
-
-
-        return {
-            'doc_id': doc_id,
-            'title': document[0],
-            'fragments': [{'fragment_id': frag[0], 'text': frag[1]} for frag in fragments]
-        }
-
-    def load_fragments(self):
-        """
-        Load all fragments from the database and populate the in-memory structures.
+        Save the bag of words to the database.
         """
         cursor = self.db.cursor()
-        cursor.execute("SELECT fragment_id, text FROM fragments;")
+        for word_id, frequency in bow:
+            cursor.execute("INSERT INTO bow_data (doc_id, word_id, frequency) VALUES (?, ?, ?);", (doc_id, word_id, frequency))
+        self.db.commit()
 
+    def load_documents(self):
+        self.documents = self.db.execute("SELECT title FROM documents;").fetchall()
+        print(f"Loaded documents: {len(self.documents)}")
+
+    def load_dictionary(self):
+        """
+        Load the dictionary from the database if it exists.
+        """
+        cursor = self.db.cursor()
+        cursor.execute("SELECT word_id, word FROM dictionary_data ORDER BY word_id;")
         rows = cursor.fetchall()
-        print ("Loading {} fragments from database".format(len(rows)))
-        for idx,row in enumerate(rows):
-            print("Loading fragment % {}".format( idx / len(rows) * 100))
-            fragment_id, text = row
-            self.documents.append({'fragment_id': fragment_id, 'text': text})
-            tokens = self.tokenizer(text)
-            if self.dictionary:
-                bow = self.dictionary.doc2bow(tokens)
-            else:
-                # Initialize dictionary with the first document
-                self.dictionary = self.buildWordDict([tokens])
-                bow = self.dictionary.doc2bow(tokens)
-            self.corpus.append(bow)
-            self._update_models()
-            
-    
-    def break_down_to_paragraphs(self, text):
+        
+        if rows:
+            self.dictionary = corpora.Dictionary()
+            self.dictionary.id2token = {row[0]: row[1] for row in rows}
+            self.dictionary.token2id = {v: k for k, v in self.dictionary.id2token.items()}
+            print("Dictionary loaded from database.")
+        else:
+            print("No dictionary data found in the database. Dictionary needs to be rebuilt.")
+
+
+
+    def load_bow_from_db(self):
         """
-        Break down the text into paragraphs. Here, paragraphs are assumed to be separated by new lines.
-        This can be customized as per the specific document structure.
+        Load BOW data from the database and reconstruct the corpus.
         """
-        return [para.strip() for para in text.split("\n") if para.strip()]
-    
+        cursor = self.db.cursor()
+        cursor.execute("""
+            SELECT doc_id, word_id, frequency
+            FROM bow_data
+            ORDER BY doc_id;
+        """)
+        rows = cursor.fetchall()
+
+        if rows:
+            # Determine the highest doc_id to initialize the corpus list
+            max_doc_id = max(row[0] for row in rows)
+            self.corpus = [[] for _ in range(max_doc_id + 1)]
+
+            for doc_id, word_id, frequency in rows:
+                if doc_id >= len(self.corpus):
+                    continue
+                self.corpus[doc_id].append((word_id, frequency))
+
+            print("BOW data loaded from database.")
+            self._update_models()  # Ensure models are updated after loading BOW
+        else:
+            print("No BOW data found in the database.")
+
+
     def _update_models(self):
         """
         Internal function to update TF-IDF, LSI models and index after corpus changes.
@@ -215,27 +221,32 @@ class NLP:
         else:
             print("Corpus is empty. Cannot update models.")
 
-    def search_similar_texts(self, search_term, document_id = 0):
+    def search_similar_texts(self, search_term, document_id=0):
         time_start = time()
         """
         Search for texts similar to the input search term.
         """
+        if self.dictionary is None:
+            print("Error: Dictionary is not initialized.")
+            return []
+
         query_bow = self.dictionary.doc2bow(self.tokenizer(search_term))
-        print(f"Query: {query_bow}")
-        query_tfidf = self.tfidf_model[query_bow]
-        print(f"Query TF-IDF: {query_tfidf}")
-        query_lsi = self.lsi_model[query_tfidf]
-        print(f"Query LSI: {query_lsi}")
+        print (f"Query BOW: {query_bow}")
+        query_tfidf = self.tfidf_model[query_bow] if self.tfidf_model else []
+        print (f"Query TF-IDF: {query_tfidf}")
+        query_lsi = self.lsi_model[query_tfidf] if self.lsi_model else []
+        print (f"Query LSI: {query_lsi}")
 
         self.index.num_best = 10
-        similar_texts = self.index[query_lsi]
+        similar_texts = self.index[query_lsi] if self.index else []
         similar_texts.sort(key=itemgetter(1), reverse=True)
         print (f"Similar texts: {similar_texts}")
-        results = []
 
+        results = []
         for j, text in enumerate(similar_texts):
             # Adjust the document index by subtracting 1 from the database ID
             document_index = text[0] + document_id
+            print (f"Document ID: {document_index}, Relevance: {text[1]}")
             if document_index < 0 or document_index >= len(self.documents):
                 continue
 
@@ -250,50 +261,45 @@ class NLP:
 
         print(f"Search time: {time() - time_start:.4f}s")
         return results
-    
-    def break_down_to_paragraphs(self, text):
-        paragraphs = text.split('. ')
-        return paragraphs
-    
+
 
     def save_models(self):
-        print ("Saving models to disk...")
         """
-        Save the models and index to disk.
+        Save the models to disk.
         """
         if self.tfidf_model:
+            print ("Saving TF-IDF model to disk...")
             self.tfidf_model.save('model_tfidf.model')
         if self.lsi_model:
+            print ("Saving LSI model to disk...")
             self.lsi_model.save('model_lsi.model')
         if self.index:
+            print ("Saving index to disk...")
             self.index.save('model_index.index')
-        if self.dictionary: 
-            self.dictionary.save('model_dictionary.dict')
-                
-        print("Saved models to disk.")
-        
+        if self.dictionary:
+            print ("Saving dictionary to database...")
+            cursor = self.db.cursor()
+            for word_id, word in self.dictionary.id2token.items():
+                cursor.execute("INSERT INTO dictionary_data (word_id, word) VALUES (?, ?)", (word_id, word))
+            self.db.commit()
+            
+            
+
     def load_models(self):
-        print ("Loading models from disk...")
-        """ 
-        Load the models and index from disk.
+        """
+        Load the models from disk.
         """
         if os.path.exists('model_tfidf.model'):
             self.tfidf_model = gensim.models.TfidfModel.load('model_tfidf.model')
-            print ("TF-IDF model loaded.")
-        else:
-            print("TF-IDF model not found.")
-            
         if os.path.exists('model_lsi.model'):
             self.lsi_model = gensim.models.LsiModel.load('model_lsi.model')
-            print ("LSI model loaded.")
-        else:
-            print("LSI model not found.")
-            
         if os.path.exists('model_index.index'):
             self.index = similarities.MatrixSimilarity.load('model_index.index')
-            print ("Index loaded.")
-        else:
-            print("Index not found.")
-        if os.path.exists('model_dictionary.dict'):
-            self.dictionary = corpora.Dictionary.load('model_dictionary.dict')
-            print ("Dictionary loaded.")
+        
+
+    def break_down_to_paragraphs(self, text):
+        """
+        Break down the text into paragraphs. Here, paragraphs are assumed to be separated by new lines.
+        This can be customized as per the specific document structure.
+        """
+        return [para.strip() for para in text.split("\n") if para.strip()]
